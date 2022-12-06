@@ -1,83 +1,46 @@
 import * as http from "http";
-import {InsightError} from "../IInsightFacade";
 
 export class GeoLocation {
+	protected requestAddress: string = "http://cs310.students.cs.ubc.ca:11316/api/v1/project_team132/";
 
-	constructor() {
-		// console.log("Geolocation class created");
-	}
-
-	public processLatAndLong(internalRoomsInput: any) {
-		return new Promise((resolve, reject) => {
-			let promiseLatAndLong: any = [];
-
-			// console.log("process called");
-
-			let requestAddress = "http://cs310.students.cs.ubc.ca:11316/api/v1/project_team132/";
-
-			// console.log("index", index);
-			// console.log(internalRoomsInput);
-			for (let roomBuildingName in internalRoomsInput) {
-				// console.log(roomBuildingName);
-				let geoLocationResult: any = {lat: null, lon: null};
-
-				let roomInfo = internalRoomsInput[roomBuildingName];
-				// console.log("roomInfo");
-				// console.log(roomInfo);
-				let appendAddress = encodeURIComponent(roomInfo.address);
-				// console.log("addy", appendAddress);
-				let newAddress = requestAddress + appendAddress;
-
-				promiseLatAndLong.push(this.processLatAndLongHelper(geoLocationResult, newAddress,
-					roomInfo, internalRoomsInput));
+	public setBuildingCoordinates(buildingsMap: any) {
+		return new Promise((resolve) => {
+			let promiseArrayOfHTTP: any = [];
+			for (const [buildingName] of buildingsMap) {
+				// https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Map/get#:~:text=The%20get()%20method%20returns,it%20inside%20the%20Map%20object.
+				// interesting property of Map's get(), if the value is an object you will receive a reference to it (not a copy of the object), any change made to this object will modify it directly in the map!
+				let buildingObject = buildingsMap.get(buildingName);
+				let buildingAddress = encodeURIComponent(buildingObject.address);
+				let httpAddress = this.requestAddress + buildingAddress;
+				promiseArrayOfHTTP.push(this.retrieveCoordinates(httpAddress, buildingObject));
 			}
 
-			return Promise.all(promiseLatAndLong).then((res) => {
+			// if you use Promise.all, you reject if any of the promises reject
+			// use Promise.allSettled because we SKIP over buildings we fail to retrieve coordinates for
+			// there is no need to handle the case where an invalid coordinate retrieval causes a (building) promise to be rejected, just ignore it and we will filter out the invalid results later
+			// if we fail to retrieve the coordinates for a building, we will not add the coordinate key value pairs to the corresponding rooms
+			// this is how we identify any invalid rooms, as these invalid builings will result in rooms without all 11 keys (in particular, they will be missing lat and lon keys)
+			return Promise.allSettled(promiseArrayOfHTTP).then(() => {
 				resolve(true);
-			}).catch((err) => {
-				reject(new InsightError("ERROR: unable to process lat and long" + err));
 			});
 		});
 	}
 
-	// HELPER:
-	public processLatAndLongHelper(currResult: any, address: string, roomInfo: any, internalRoomsIndex: any) {
-		// TODO: Send request to http://cs310.students.cs.ubc.ca:11316/api/v1/project_team132/<ADDRESS>
-
-		// console.log("process1");
-
-		// let promises: Promise<any> =
+	private retrieveCoordinates(address: string, buildingObject: any) {
 		return new Promise((resolve, reject) => {
-			http.get(address, (result: any) => {
-
-				result.on("data", (tempRes: any) => {
-
-					let res = JSON.parse(tempRes);
-					if (res.lat === undefined || res.lon === undefined) {
-						reject(new InsightError("invalid lat or lon"));
-					} else {
-						// console.log("res", res.lat, res.lon);
-						roomInfo.lat = res.lat;
-						roomInfo.lon = res.lon;
-						// fix this
-						// console.log("roomInfo shrotname" + roomInfo.shortname);
-						// console.log("roomInfo longn name" + roomInfo.longname);
-						internalRoomsIndex[roomInfo.shortname] = roomInfo;
-						// console.log(internalRoomsIndex);
+			http.get(address, (response: any) => {
+				if (response.statusCode < 200 || response.statusCode >= 300) {
+					return reject(new Error("HTTP error with statusCode=" + response.statusCode));
+				}
+				response.on("data", (result: any) => {
+					let coordinates = JSON.parse(result);
+					if (coordinates.lat !== undefined && coordinates.lon !== undefined) {
+						buildingObject.lat = coordinates.lat;
+						buildingObject.lon = coordinates.lon;
 					}
 				});
-				// FIX THIS
 				resolve(true);
 			});
-		}).catch((err) => {
-			return new InsightError("Error processing lat and long" + err);
 		});
-
-		// Promise.all([promises]).then((result): any => {
-		// 	console.log("res", result);
-		// 	return Promise.resolve(result);
-		// });
 	}
-
-
 }

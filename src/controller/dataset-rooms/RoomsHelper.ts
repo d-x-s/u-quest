@@ -1,7 +1,6 @@
-import {InsightDatasetKind, InsightError, InsightResult} from "../IInsightFacade";
+import {InsightDatasetKind, InsightError} from "../IInsightFacade";
 import {IRoomDataset} from "./IRoomDataset";
 import JSZip from "jszip";
-// import parse5 from "parse5";
 import {parse} from "parse5";
 import {IRoomData} from "./IRoomData";
 import {GeoLocation} from "./GeoLocation";
@@ -9,23 +8,18 @@ import path from "path";
 import fs from "fs";
 
 export default class RoomsHelper {
-
 	public indexDirectory: string;
-	public findLocation: GeoLocation;
-	public internalIndex: any;
-	public internalBuildings: any;
-	public buildingListObject: {[key: string]: IRoomData};
+	public geoLocationHelper: GeoLocation;
+	public roomsList: any;
 	public fileDirectory: string;
-	public datasetID: string;
+	protected buildingsMap: Map<string, IRoomData>; // map of key:value pairs where the key is the building name and the value is an object with the building information
 
-	constructor(id: string) {
+	constructor() {
 		this.indexDirectory = "index.htm";
-		this.findLocation = new GeoLocation();
-		this.internalIndex = [];
-		this.internalBuildings = [];
-		this.buildingListObject = {};
 		this.fileDirectory = __dirname + "/../../data";
-		this.datasetID = id;
+		this.geoLocationHelper = new GeoLocation();
+		this.roomsList = [];
+		this.buildingsMap = new Map();
 	}
 
 	public addRoomsDatasetToModel(
@@ -35,226 +29,215 @@ export default class RoomsHelper {
 		model: Map<string, IRoomDataset>
 	): Promise<string[]> {
 		let zipped: JSZip = new JSZip();
-		return new Promise<string[]> ((resolve, reject) => {
-			zipped.loadAsync(content, {base64: true})
-				.then((loadedZipFiles) => {
-					return this.handleRoomProcessing(loadedZipFiles);
-				}).then((result) => {
-					// let processedResults = this.processResult(result);
-					// console.log(processedResults);
-					// CUT OUT OBJECTS WITH MISSING KEYS
-					let filteredResult = result.filter((res) => {
-						// console.log(Object.keys(res).length);
-						let length: number = Object.keys(res).length;
-						let lengthString = length.toString();
-						if (lengthString === "11") {
-							return true;
-						} else {
-							return false;
-						}
-					});
-					// console.log(result);
-					// console.log(filteredResult.length);
-					resolve(this.setDataToModelAndDisk(id, filteredResult, kind, content, model));
-				})
-				.catch((err) => {
-					reject(new InsightError("InsightError: failed to add" + err));
-				});
-		});
-	}
-
-	public processResult(result: any[]) {
-		let retArray: any = [];
-
-		result.forEach((room) => {
-			let newRoom: any  = {};
-			let objKeyArray = Object.keys(room);
-
-			objKeyArray.forEach((key) => {
-				let newKey = this.datasetID + "_" + key;
-				newRoom[newKey] = room[key];
-			});
-			retArray.push(newRoom);
-		});
-		return retArray;
-	}
-
-	public handleRoomProcessing(zipped: JSZip): Promise<IRoomData[]> {
-		return new Promise<IRoomData[]> ((resolve, reject) => {
-			let indexHtmFile = zipped.file("index.htm");
-			let parsedZip: any;
-			if (indexHtmFile == null) {
-				return new InsightError("file was null");
-			}
-			parsedZip = indexHtmFile.async("string").then((indexHtmFileContent) => {
-				let parsedFileContentDocument = parse(indexHtmFileContent);
-				for (let contentNode of parsedFileContentDocument.childNodes) {
-					let currNodeName = contentNode.nodeName;
-					if (currNodeName === "html") {
-						this.indexHtmBuildingHelper(contentNode);
-					}
+		return new Promise<string[]>((resolve, reject) => {
+			zipped.loadAsync(content, {base64: true}).then((loadedZipFiles) => {
+				return this.loadAsyncHelper(loadedZipFiles);
+			}).then((result) => {
+				if (result instanceof InsightError) {
+					reject(new InsightError("InsightError: failed to add" + result));
 				}
-				return;
+				let filteredResult = result.filter((res) => {
+					let length: number = Object.keys(res).length;
+					let lengthString = length.toString();
+					return lengthString === "11";
+				});
+				resolve(this.setDataToModelAndDisk(id, filteredResult, kind, content, model));
 			}).catch((err) => {
-				reject(new InsightError("unable to async" + err));
+				reject(new InsightError("InsightError: failed to add" + err));
 			});
-
-			console.log("point 2.9 reached");
-			Promise.all([parsedZip]).then(() => {
-				console.log("point 3 reached");
-				this.findLocation.processLatAndLong(this.buildingListObject)
-					.then(() => {
-						resolve(this.processRooms(zipped));
-					}).catch((err) => {
-						reject(new InsightError("ERROR: unable to process lat" + err));
-					});
-			});
-
 		});
 	}
 
-	public processRooms(zipped: any): Promise<IRoomData[]> {
-		return new Promise<IRoomData[]> ((resolve, reject) => {
+	private loadAsyncHelper(zipped: JSZip): Promise<IRoomData[]> {
+		return new Promise<IRoomData[]>((resolve, reject) => {
+			let parsedZip: any;
+			let indexHtmFile                 = zipped.file("index.htm");
+			let buildingsAndClassRoomsFolder = zipped.folder("campus/discover/buildings-and-classrooms");
+
+			if (indexHtmFile !== null) {
+				parsedZip = indexHtmFile.async("string").then((indexHtmFileStringified) => {
+					let indexHtmFileObject = parse(indexHtmFileStringified);
+					for (let contentNode of indexHtmFileObject.childNodes) {
+						let currNodeName = contentNode.nodeName;
+						if (currNodeName === "html") {
+							this.processBuildingsHelper(contentNode);
+						}
+					}
+				}).catch((err) => {
+					reject(new InsightError("unable to async" + err));
+				});
+			} else {
+				reject(new InsightError("file was null"));
+			}
+
+			Promise.all([parsedZip]).then(() => { // use square brackets to explicitly pass in parsedZip as object
+				this.geoLocationHelper.setBuildingCoordinates(this.buildingsMap).then(() => {
+					resolve(this.mergeBuildingsAndRooms(buildingsAndClassRoomsFolder));
+				});
+			});
+		});
+	}
+
+	private mergeBuildingsAndRooms(buildingsAndClassRoomsFolder: any): Promise<IRoomData[]> {
+		return new Promise<IRoomData[]>((resolve, reject) => {
 			let dataToPush: Array<Promise<IRoomData>> = [];
-			let fileFolder = zipped.folder("campus/discover/buildings-and-classrooms");
-			if (fileFolder == null) {
+			if (buildingsAndClassRoomsFolder == null) {
 				return new InsightError("InsightError: null file folder, could not load");
 			}
-			fileFolder.forEach((buildingPath: any, file: any) => {
-				dataToPush.push(file.async("string")
-					.then((result: any) => {
-						let buildingPathNoHTM = buildingPath.split(".")[0];
-						this.processRoomsHelper(this.buildingListObject[buildingPathNoHTM], parse(result));
-					}).catch((err: any) => {
-						reject(new InsightError("Unable to process room" + err));
-					}));
+			buildingsAndClassRoomsFolder.forEach((buildingFileName: any, file: any) => {
+				dataToPush.push(file.async("string").then((buildingClassRoomsHtm: any) => {
+					let buildingName = buildingFileName.split(".")[0];
+					this.combineBuildingWithRooms(this.buildingsMap.get(buildingName), parse(buildingClassRoomsHtm));
+				}).catch((err: any) => {
+					reject(new InsightError("Unable to process room" + err));
+				})
+				);
 			});
 			Promise.all(dataToPush).then(() => {
-				resolve(this.internalIndex);
+				resolve(this.roomsList);
 			});
 		});
 	}
 
-	public processRoomsHelper(roomToProcess: any, res: any) {
-		for (let resNode of res.childNodes) {
-			if (resNode.nodeName === "html") {
-				return this.addProcessedRooms(roomToProcess, resNode);
+	// BUILDING HELPERS (deals with the index.htm object)
+	private processBuildingsHelper(htmlNode: any) {
+		if (htmlNode != null) {
+			for (let htmlSearchNode of htmlNode.childNodes) {
+				let currName = htmlSearchNode.nodeName;
+				if (currName === "tbody") {
+					for (let trSearchNode of htmlSearchNode.childNodes) {
+						if (trSearchNode.nodeName === "tr") {
+							this.addBuildingToMap(trSearchNode);
+						}
+					}
+				} else if (currName === "body"
+				        || currName === "div"
+				        || currName === "table"
+			        	|| currName === "section") {
+					this.processBuildingsHelper(htmlSearchNode);
+				}
 			}
 		}
 	}
 
-	public addProcessedRooms(roomToAdd: any, res: any) {
-		for (let child of res.childNodes) {
-			let currName = child.nodeName;
+	private addBuildingToMap(trNode: any) {
+		let newBuilding: IRoomData = {} as IRoomData;
+		for (let tdSearchNode of trNode.childNodes) {
+			if (tdSearchNode.nodeName === "td") {
+				let attributeType = tdSearchNode.attrs[0]["value"];
+				this.extractBuildingDatafromTableCell(tdSearchNode, attributeType, newBuilding);
+				if (newBuilding.shortname !== null) { // you cannot set a map with a null key
+					this.buildingsMap.set(newBuilding.shortname, newBuilding);
+				}
+			}
+		}
+	}
+
+	private extractBuildingDatafromTableCell(tdNode: any, attributeType: any, newBuilding: any) {
+		if (attributeType === "views-field views-field-title") {
+			for (let anchorSearchNode of tdNode.childNodes) {
+				if (anchorSearchNode.nodeName === "a") {
+					this.extractBuildingDataFromAnchor(anchorSearchNode, newBuilding);
+				}
+			}
+		} else if (attributeType === "views-field views-field-field-building-code") {
+			if (typeof this.trimText(tdNode) === "string") {
+				newBuilding.shortname = this.trimText(tdNode);
+			}
+		} else if (attributeType === "views-field views-field-field-building-address") {
+			newBuilding.address = this.trimText(tdNode);
+		}
+	}
+
+	private extractBuildingDataFromAnchor(a: any, newBuilding: any) {
+		if (a.attrs[1]["value"] === "Building Details and Map") {
+			for (let textSearchNode of a.childNodes) {
+				if (textSearchNode.nodeName === "#text") {
+					newBuilding.fullname = textSearchNode.value;
+				}
+			}
+		}
+	}
+
+	// ROOM HELPERS (deals with a single room object from buildings-and-classrooms)
+	private combineBuildingWithRooms(building: any, buildingWithClassRooms: any) {
+		for (let htmlSearchNode of buildingWithClassRooms.childNodes) {
+			if (htmlSearchNode.nodeName === "html") {
+				return this.processRoomsHelper(building, htmlSearchNode);
+			}
+		}
+	}
+
+	private processRoomsHelper(building: any, buildingWithClassRoomsObject: any) {
+		for (let tbodySearchNode of buildingWithClassRoomsObject.childNodes) {
+			let currName = tbodySearchNode.nodeName;
 			if (currName === "tbody") {
-				for (let childLayer of child.childNodes) {
-					if (childLayer.nodeName === "tr") {
-						this.populateIRoomData(roomToAdd, childLayer);
+				for (let trSearchNode of tbodySearchNode.childNodes) {
+					if (trSearchNode.nodeName === "tr") {
+						this.addRoomToList(building, trSearchNode);
 					}
 				}
-			} else if (currName === "body" || currName === "div" || currName === "table" || currName === "section") {
-				this.addProcessedRooms(roomToAdd, child);
+			} else if (currName === "body"
+			        || currName === "div"
+	             	|| currName === "table"
+		         	|| currName === "section") {
+	 			this.processRoomsHelper(building, tbodySearchNode);
 			}
 		}
 	}
 
-	public populateIRoomData(roomToAdd: any, node: any) {
-		if (node === null) {
+	private addRoomToList(building: any, trNode: any) {
+		if (trNode === null) {
 			return;
 		}
-		let newRoom = Object.assign({}, roomToAdd);
-		for (let param of node.childNodes) {
-			if (param.nodeName === "td") {
-				let currAttrs = param.attrs[0]["value"];
-
-				if (currAttrs === "views-field views-field-field-room-number") {
-					let retrieveAttrs = {name: "", href: ""};
-					let roomFullName = "";
-					for (let paramChild of param.childNodes) {
-						if (paramChild.nodeName === "a") {
-							for (let t of paramChild.childNodes) {
-								if (t.nodeName === "#text") {
-									roomFullName = t.value;
-								}
-							}
-							retrieveAttrs["name"] = roomFullName;
-							retrieveAttrs["href"] = paramChild.attrs[0].value;
-						}
-					}
-					newRoom.name = newRoom.shortname + "_" + roomFullName;
-					newRoom.number = roomFullName;
-					newRoom.href = retrieveAttrs["href"];
-
-				} else if (currAttrs === "views-field views-field-field-room-capacity") {
-					newRoom.seats = Number(this.trimText(param));
-				} else if (currAttrs === "views-field views-field-field-room-type") {
-					newRoom.type = this.trimText(param);
-				} else if (currAttrs === "views-field views-field-field-room-furniture") {
-					newRoom.furniture = this.trimText(param);
-				}
+		let newRoom = Object.assign({}, building);
+		for (let tdSearchNode of trNode.childNodes) {
+			if (tdSearchNode.nodeName === "td") {
+				let attributeType = tdSearchNode.attrs[0]["value"];
+				this.extractRoomDataFromTableCell(tdSearchNode, attributeType, newRoom);
 			}
 		}
-		this.internalIndex.push(newRoom);
+		this.roomsList.push(newRoom);
 	}
 
-
-	public indexHtmBuildingHelper(contentNode: any) {
-		if (contentNode != null) {
-			for (let contentNodeChild of contentNode.childNodes) {
-				let currName = contentNodeChild.nodeName;
-				if (currName === "tbody") {
-					for (let tr of contentNodeChild.childNodes) {
-						if (tr.nodeName === "tr") {
-							this.convertIntoBuilding(tr);
-						}
-					}
-				} else if (currName === "body" || currName === "div" || currName === "table"
-					|| currName === "section") {
-					this.indexHtmBuildingHelper(contentNodeChild);
-				}
-			}
+	private extractRoomDataFromTableCell(tdNode: any, attributeType: any, newRoom: any) {
+		if (attributeType === "views-field views-field-field-room-number") {
+			this.extractRoomDataFromAnchor(tdNode, newRoom);
+		} else if (attributeType === "views-field views-field-field-room-capacity") {
+			newRoom.seats = Number(this.trimText(tdNode));
+		} else if (attributeType === "views-field views-field-field-room-type") {
+			newRoom.type = this.trimText(tdNode);
+		} else if (attributeType === "views-field views-field-field-room-furniture") {
+			newRoom.furniture = this.trimText(tdNode);
 		}
 	}
 
-	private convertIntoBuilding(child: any) {
-		let newRoom: IRoomData = {} as IRoomData;
-		for (let childNode of child.childNodes) {
-			if (childNode.nodeName === "td") {
-				let tempAttrs = childNode.attrs[0]["value"];
-				if (tempAttrs === "views-field views-field-title") {
-					for (let searchName of childNode.childNodes) {
-						if (searchName.nodeName === "a") {
-							if(searchName.attrs[1]["value"] === "Building Details and Map") {
-								for (let searchNameChild of searchName.childNodes) {
-									if (searchNameChild.nodeName === "#text") {
-										let text = searchNameChild.value;
-										// console.log("searchNameChild value be " + text);
-										newRoom.fullname = text;
-									}
-								}
-							}
-						}
+	private extractRoomDataFromAnchor(tdNode: any, newRoom: any) {
+		let name:     string = "";
+		let href:     string = "";
+		let fullName: string = "";
+		for (let anchorSearchNode of tdNode.childNodes) {
+			if (anchorSearchNode.nodeName === "a") {
+				let anchorNode = anchorSearchNode;
+				for (let textNode of anchorNode.childNodes) {
+					if (textNode.nodeName === "#text") {
+						fullName = textNode.value;
 					}
-				} else if (tempAttrs === "views-field views-field-field-building-code") {
-					if (typeof this.trimText(childNode) === "string") {
-						// console.log(this.trimText(childNode));
-						newRoom.shortname = this.trimText(childNode);
-					}
-				} else if (tempAttrs === "views-field views-field-field-building-address") {
-					newRoom.address = this.trimText(childNode);
 				}
+				name = fullName;
+				href = anchorSearchNode.attrs[0].value;
 			}
 		}
-		if (newRoom.shortname != null) {
-			this.internalBuildings.push(newRoom);
-			this.buildingListObject[newRoom.shortname] = newRoom;
-		};
+		newRoom.name = newRoom.shortname + "_" + fullName;
+		newRoom.number = name;
+		newRoom.href = href;
 	}
 
+	// Utility function for helping with data extraction from htm files
 	private trimText(paramToTrim: any) {
 		for (let paramChild of paramToTrim.childNodes) {
 			if (paramChild.nodeName === "#text") {
-				let trimmed = (paramChild).value.replace("\n", "").trim();
+				let trimmed = paramChild.value.replace("\n", "").trim();
 				return trimmed as string;
 			}
 		}
@@ -274,10 +257,7 @@ export default class RoomsHelper {
 				data: convertedRooms,
 				kind: kind,
 			};
-			// console.log("model");
-			// console.log(model);
 			model.set(id, newDataset);
-			// console.log(model);
 			let updateKeysAfterAdd: string[] = Array.from(model.keys());
 			let datasetFile = path.join(this.fileDirectory, "/" + id + ".zip");
 			try {
